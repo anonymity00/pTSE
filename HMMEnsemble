@@ -1,0 +1,360 @@
+import warnings
+warnings.filterwarnings('ignore')
+import numpy as np
+from scipy.stats import norm
+#from scipy.linalg import solve
+from numpy.linalg import solve
+from scipy.optimize import fsolve
+from src.BootstrapKDE import *
+
+class HMMEmbeddingNonparametric:
+
+    def __init__(self, Y, quantile=0.5, model_output=np.array([]), parameter={}, normalization=True):
+        '''
+
+        :param Y: validation 集合上y值, (n,) shape array。
+        :param X: validation 集合上x值。
+        :param model_dict: 用于融合的模型, dictionary。
+        :param model_output: 模型输出, (m,n) shape array。
+        :param parameter: HMM模型参数, 默认为空。若为空则通过EM算法估计。
+        :param normalization: bool, 是否对数据进行normalization, 默认为 True。
+        '''
+        self.Y = Y
+        self.quantile = quantile
+        self.model_output = model_output
+        if len(model_output) == 0:
+            print('No data given!')
+        self.n_instance = len(self.Y)
+        self.n_state = self.model_output.shape[0]
+        self.parameter = parameter
+        self.Y_avg = np.mean(Y)
+        self.Y_std = np.std(Y)
+        if normalization is True:
+            self.model_output = (self.model_output - self.Y_avg) / self.Y_std
+            self.Y = (self.Y - self.Y_avg) / self.Y_std
+            self.normalization = True
+        else:
+            self.normalization = False
+        self.model_error = self.Y - self.model_output
+        self.last_state = None
+        self.gamma = None
+        self.inv_pi = None
+
+    def initial_parameter(self):
+        np.random.seed = 1
+        pi_initial = np.ones(self.n_state) / self.n_state
+        A_initial = np.ones((self.n_state, self.n_state))
+        A_initial = A_initial / np.sum(A_initial, axis=1).reshape(-1, 1)
+        sigma_initial = np.std(self.model_error, axis=1)
+        mu_initial = np.mean(self.model_error, axis=1)
+        B_initial = np.exp(
+            -1 * (self.model_error - mu_initial.reshape(-1, 1)) ** 2 / (2 * (sigma_initial.reshape(-1, 1)) ** 2)) / \
+                    (np.sqrt(2 * np.pi) * sigma_initial.reshape(-1, 1))
+        self.parameter = {'pi_vec': pi_initial, 'A': A_initial, 'sigma': sigma_initial, 'mu': mu_initial,
+                          'B': B_initial}
+        alpha = np.zeros((self.n_state, self.n_instance))
+        alpha[:, 0] = pi_initial * B_initial[:, 0]
+        for n in range(1, self.n_instance):
+            alpha[:, n] = (alpha[:, n - 1]).dot(A_initial) * B_initial[:, n]
+        beta = np.zeros((self.n_state, self.n_instance))
+        beta[:, -1] = np.ones(self.n_state)
+        for n in range(self.n_instance - 2, -1, -1):
+            beta[:, n] = A_initial.dot(B_initial[:, n + 1] * beta[:, n + 1])
+        self.parameter['alpha'] = alpha
+        self.parameter['beta'] = beta
+
+    def gamma_compute(self):
+        alpha = self.parameter['alpha']
+        beta = self.parameter['beta']
+        gamma = alpha * beta / np.sum(alpha * beta, axis=0)
+        return gamma
+
+    def mm_update(self, gamma):
+        pi_update = gamma[:, 0]
+        A = self.parameter['A']
+        B = self.parameter['B']
+        beta = self.parameter['beta']
+        A_update = np.array(
+            [(gamma[n, :-1] * (A[n, :].reshape(-1, 1) * B[:, 1:] * (beta[:, 1:] / beta[n, :-1]))).sum(axis=1) \
+             / gamma[n, :-1].sum()
+             for n in range(self.n_state)])
+        return pi_update, A_update
+
+    def quantile_correction(self, gamma):
+        error_upper = self.model_error.max(axis=1)
+        error_lower = self.model_error.min(axis=1)
+        correction_precision = (error_upper - error_lower) / self.n_instance
+        correction_sample_no = np.floor(correction_precision ** (-2))
+        correction = np.zeros(self.n_state)
+        for n in range(self.n_state):
+            samples = np.linspace(error_lower[n], error_upper[n], correction_sample_no[n])
+            corrected_sample = self.model_error[n, :] - samples.reshape(-1, 1)
+            I1 = (corrected_sample <= 0)
+            distance = (gamma[n, :] * corrected_sample * (self.quantile - I1)).sum(axis=1)
+            x = np.argmin(distance)
+            correction[n] = samples[x]
+        return correction
+
+    def _golden_rule_rad(self, corrected_error, gamma):
+        mu = (corrected_error * gamma).sum(axis=1) / gamma.sum(axis=1)
+        sigma = np.sqrt((gamma * (corrected_error - mu.reshape(-1, 1)) ** 2).sum(axis=1) / gamma.sum(axis=1))
+        expect_n = (gamma.sum(axis=1)) ** (-1 / 5)
+        rad = 1.06 * sigma * expect_n
+        return rad
+
+    def _KDE_estimate(self, gamma, corrected_error):
+        kde_estimator = BootstrapKDE(maxfev=10000)
+        rad = None
+        return rad
+
+    def pdf_update(self, gamma, rad, print_correct=False):
+        correction = self.quantile_correction(gamma=gamma)
+        if print_correct:
+            print('correction is')
+            print(correction)
+        corrected_error = self.model_error - correction.reshape(-1, 1)
+        I1 = (corrected_error <= 0)
+        I2 = (corrected_error > 0)
+        cof11 = np.sum(gamma * I1, axis=1)
+        cof12 = np.sum(gamma * I2, axis=1)
+        if rad == 'modified_golden':
+            mu = (corrected_error * gamma).sum(axis=1) / gamma.sum(axis=1)
+            sigma = np.sqrt((gamma * (corrected_error - mu.reshape(-1, 1)) ** 2).sum(axis=1) / gamma.sum(axis=1))
+            expect_n = (gamma.sum(axis=1))**(-1/5)
+            rad = 1.06 * sigma * expect_n
+        elif rad == 'golden':
+            sigma = np.std(corrected_error, axis=1)
+            expect_n = self.n_instance
+            rad = 1.06 * sigma * expect_n
+        elif rad == 'KDE':
+            rad = self._KDE_estimate()
+        elif type(rad) is float:
+            pass
+        else:
+            raise ValueError("Unknown rad")
+        V = norm.cdf(-1 * corrected_error, 0, rad.reshape(-1, 1))
+        cof21 = np.sum(gamma * I1 * V, axis=1)
+        cof22 = np.sum(gamma * I2 * V, axis=1)
+        W = np.array([solve(np.array([[cof11[n], cof12[n]], [cof21[n], cof22[n]]]), np.array([1, self.quantile]))
+                      for n in range(self.n_state)])
+        B = np.array([W[n, 0] * np.sum(gamma[n, :] * norm.pdf((corrected_error[n, :] -
+                                                               corrected_error[n, :].reshape(-1, 1)), 0, rad[n])
+                                       * I1[n, :],
+                                       axis=0) +
+                      W[n, 1] * np.sum(gamma[n, :] * norm.pdf((corrected_error[n, :] -
+                                                               corrected_error[n, :].reshape(-1, 1)), 0, rad[n])
+                                       * I2[n, :],
+                                       axis=0)
+                      for n in range(self.n_state)])
+        kde_estimate = {'W': W, 'I1': I1, 'I2': I2, 'rad': rad, 'correction': correction}
+        return B, kde_estimate
+
+    def diff_compute(self, pi_update, A_update):
+        A = self.parameter['A']
+        diff_pi = np.sqrt(((pi_update - self.parameter['pi_vec']) ** 2).sum() / self.n_state)
+        diff_A = np.sqrt(((A_update - A) ** 2).sum() / self.n_state ** 2)
+        diff = max([diff_pi, diff_A])
+        return diff
+
+    def alpha_beta_compute(self, pi_update, A_update, B_update):
+        alpha = self.parameter['alpha'].copy()
+        beta = self.parameter['beta'].copy()
+        alpha[:, 0] = pi_update * B_update[:, 0]
+        for n in range(1, self.n_instance):
+            alpha[:, n] = (alpha[:, n - 1]).dot(A_update) * B_update[:, n]
+        for n in range(self.n_instance - 2, -1, -1):
+            beta[:, n] = A_update.dot(B_update[:, n + 1] * beta[:, n + 1])
+        return alpha, beta
+
+    def EM_estimate(self, rad='modified_golden', tol=1e-3, N=1000):
+        '''
+        :param rad: kernel bandwidth
+        :param tol: tolerance。
+        :param N: 迭代步数。
+        :return: self.parameter。
+        '''
+        if len(self.parameter) == 0:
+            self.initial_parameter()
+        diff = 1
+        cnt = 0
+        while diff >= tol and cnt <= N:
+            gamma = self.gamma_compute()
+            pi_update, A_update = self.mm_update(gamma=gamma)
+            B_update, kde_update = self.pdf_update(gamma=gamma, rad=rad)
+            diff = self.diff_compute(pi_update=pi_update, A_update=A_update)
+            if any([np.isnan(A_update).any(),
+                    np.isnan(B_update).any()]):
+                print('Ill conditioned sample, results may be inaccurate!')
+                break
+            alpha, beta = self.alpha_beta_compute(pi_update=pi_update, A_update=A_update, B_update=B_update)
+            if any([np.isnan(beta).any(),
+                    np.isnan(alpha).any()]):
+                print('Ill conditioned sample, results may be inaccurate!')
+                break
+            self.parameter.update({'A': A_update, 'B': B_update, 'pi_vec': pi_update})
+            self.parameter.update({'alpha': alpha, 'beta': beta})
+            self.parameter.update(kde_update)
+            del (alpha, beta, gamma, A_update, B_update, kde_update)
+            cnt += 1
+        self.gamma = self.gamma_compute()
+        print('epsilon reach %f' % diff)
+
+    def hidden_state_inference(self):
+        if len(self.parameter) == 0:
+            print('No parameter given, estimate parameter with EM')
+            self.EM_estimate()
+        delta = np.zeros((self.n_state, self.n_instance))
+        A = self.parameter['A']
+        B = self.parameter['B']
+        # phi = np.zeros(self.n_instance)
+        delta[:, 0] = self.parameter['pi_vec'] * self.parameter['B'][:, 0]
+        for n in range(1, self.n_instance):
+            delta[:, n] = np.max(delta[:, n - 1].reshape(-1, 1) * A, axis=1) * B[:, n]
+        delta_T = delta[:, -1]
+        last_state = np.nonzero((delta_T == delta_T.max()))[0][0]
+        self.last_state = last_state
+        return last_state
+
+    def stationary_distribution_inference(self, tol=1e-5, N=1000):
+        if len(self.parameter) == 0:
+            print('No parameter given, estimate parameter with EM')
+            self.EM_estimate()
+            A = self.parameter['A'].copy()
+            inv_pi = self.parameter['pi_vec'].copy()
+            cnt = 0
+            diff = 1
+            while diff >= tol and cnt <= N:
+                pi_n = inv_pi.dot(A)
+                cnt += 1
+                diff = np.sqrt(np.sum((pi_n - inv_pi) ** 2))
+                inv_pi = pi_n
+            self.inv_pi = inv_pi
+            if diff >= tol:
+                print('Ill conditioned sample, estimate of inv_pi may be inaccurate!')
+
+    def _state_compute(self, predtimes):
+        if self.last_state is None:
+            last_state = self.hidden_state_inference()
+        else:
+            last_state = self.last_state
+        weight_array = np.zeros((predtimes, self.n_state))
+        A = self.parameter['A'].copy()
+        weight = A
+        weight_array[0, :] = weight[last_state, :]
+        for n in range(predtimes - 1):
+            weight = weight.dot(A)
+            weight_array[n, :] = weight[last_state, :]
+        return weight_array
+
+    def weight_compute(self, predtimes, method='stationary'):
+        '''
+        :param predtimes: int, 若 predtimes = N 则计算未来第N个时间点上不同模型的权重。
+        :param method, 计算权重的方法, 'dynamic' 根据最后一个时刻状态动态估计权重; 'stationary', 直接根据平稳分布输出权重
+        :return: 权重向量。
+        '''
+        if method == 'dynamic':
+            weight_array = self._state_compute(predtimes=predtimes)
+        elif method == 'stationary':
+            if self.inv_pi is None:
+                self.stationary_distribution_inference()
+            weight_array = np.tile(self.inv_pi, (predtimes, 1))
+        else:
+            raise NameError('Invalid methods')
+        return weight_array
+
+    def _probability(self, x, weight, likelihood=False):
+        gamma = self.gamma
+        W, rad, I1, I2 = self.parameter['W'],  self.parameter['rad'], self.parameter['I1'], self.parameter['I2']
+        resid_shape = (self.n_state, self.n_instance)
+        if likelihood is False:
+            probability = ((W[:, 0] * np.sum(gamma * norm.cdf(x, 0, rad.reshape(-1, 1) * np.ones(resid_shape)) * I1,
+                                             axis=1) +
+                            W[:, 1] * np.sum(gamma * norm.cdf(x, 0, rad.reshape(-1, 1) * np.ones(resid_shape)) * I2,
+                                             axis=1)) * weight).sum()
+        else:
+            probability = ((W[:, 0] * np.sum(gamma * norm.pdf(x, 0, rad.reshape(-1, 1) * np.ones(resid_shape)) * I1,
+                                             axis=1) +
+                            W[:, 1] * np.sum(gamma * norm.pdf(x, 0, rad.reshape(-1, 1) * np.ones(resid_shape)) * I2,
+                                             axis=1)) * weight).sum()
+        return probability
+
+    def probability(self, x, weight, likelihood=False):
+        gamma = self.gamma
+        W, rad, I1, I2 = self.parameter['W'],  self.parameter['rad'], self.parameter['I1'], self.parameter['I2']
+        resid_shape = (self.n_state, self.n_instance)
+        if likelihood is False:
+            probability = ((W[:, 0] * np.sum(gamma * norm.cdf(x, 0, rad.reshape(-1, 1) * np.ones(resid_shape)) * I1,
+                                             axis=1) +
+                            W[:, 1] * np.sum(gamma * norm.cdf(x, 0, rad.reshape(-1, 1) * np.ones(resid_shape)) * I2,
+                                             axis=1)) * weight).sum()
+        else:
+            probability = ((W[:, 0] * np.sum(gamma * norm.pdf(x, 0, rad.reshape(-1, 1) * np.ones(resid_shape)) * I1,
+                                             axis=1) +
+                            W[:, 1] * np.sum(gamma * norm.pdf(x, 0, rad.reshape(-1, 1) * np.ones(resid_shape)) * I2,
+                                             axis=1)) * weight).sum()
+        return probability
+
+    def _root_search(self, weight, quantiles_pred, tol, N):
+        quantiles = quantiles_pred.copy()
+        if self.normalization is True:
+            quantiles = (quantiles - self.Y_avg) / self.Y_std
+        correction = self.parameter['correction']
+        error = quantiles - quantiles.reshape(-1, 1) - correction.reshape(-1, 1)
+        corrected_error = self.model_error - correction.reshape(-1, 1)
+        probability_array = np.array([self._probability(error[:, n].reshape(-1, 1) - corrected_error, weight=weight)
+                                      for n in range(self.n_state)])
+        #print(probability_array)
+        try:
+            inf_x = np.argmax(probability_array[probability_array <= self.quantile])
+            sup_x = np.argmin(probability_array[probability_array > self.quantile])
+            inf_bound = probability_array[probability_array <= self.quantile][inf_x]
+            sup_bound = probability_array[probability_array > self.quantile][sup_x]
+            delta_x = quantiles[sup_x] - quantiles[inf_x]
+            root_initial = quantiles[inf_x] + (sup_bound - inf_bound) / (sup_bound - self.quantile) * delta_x
+            corrected_x = (root_initial - quantiles).reshape(-1, 1) - corrected_error - correction.reshape(-1, 1)
+            f = self._probability(corrected_x, weight=weight) - self.quantile
+        except:
+            distance = np.abs(probability_array - self.quantile)
+            sel_root = np.argmin(distance)
+            root_initial = quantiles[sel_root]
+            f = probability_array[sel_root] - self.quantile
+        def equation(x):
+            corrected_x = (x - quantiles).reshape(-1, 1) - corrected_error - correction.reshape(-1, 1)
+            f = self._probability(corrected_x, weight=weight) - self.quantile
+            return f
+        root = fsolve(equation, root_initial, xtol=tol, maxfev=N)
+        root_initial = root
+        if self.normalization is True:
+            root_initial = root_initial * self.Y_std + self.Y_avg
+        return root_initial
+
+    def ensembleforecast(self, predtimes, test_output, tol=1e-3, N=5000, method='stationary'):
+        weight_array = self.weight_compute(predtimes=predtimes, method=method)
+        if predtimes > 1:
+            ensemble_forecast_array = np.zeros(predtimes)
+            for n in range(predtimes):
+                ensemble_forecast_array[n] = self._root_search(weight=weight_array[n, :],
+                                                               quantiles_pred=test_output[n, :],
+                                                               tol=tol,
+                                                               N=N)
+        else:
+            weight = weight_array[0, :]
+            if len(test_output.shape) > 1:
+                n1, n2 = test_output.shape
+                if n1 > 1:
+                    ensemble_forecast_array = self._root_search(weight=weight,
+                                                                quantiles_pred=test_output.reshape(1, -1)[0],
+                                                                tol=tol,
+                                                                N=N)
+                else:
+                    ensemble_forecast_array = self._root_search(weight=weight,
+                                                                quantiles_pred=test_output[0],
+                                                                tol=tol,
+                                                                N=N)
+            else:
+                ensemble_forecast_array = self._root_search(weight=weight,
+                                                            quantiles_pred=test_output,
+                                                            tol=tol,
+                                                            N=N)
+        return ensemble_forecast_array
+
