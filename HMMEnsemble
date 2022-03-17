@@ -10,15 +10,7 @@ from src.BootstrapKDE import *
 class HMMEmbeddingNonparametric:
 
     def __init__(self, Y, quantile=0.5, model_output=np.array([]), parameter={}, normalization=True):
-        '''
 
-        :param Y: validation 集合上y值, (n,) shape array。
-        :param X: validation 集合上x值。
-        :param model_dict: 用于融合的模型, dictionary。
-        :param model_output: 模型输出, (m,n) shape array。
-        :param parameter: HMM模型参数, 默认为空。若为空则通过EM算法估计。
-        :param normalization: bool, 是否对数据进行normalization, 默认为 True。
-        '''
         self.Y = Y
         self.quantile = quantile
         self.model_output = model_output
@@ -167,12 +159,7 @@ class HMMEmbeddingNonparametric:
         return alpha, beta
 
     def EM_estimate(self, rad='modified_golden', tol=1e-3, N=1000):
-        '''
-        :param rad: kernel bandwidth
-        :param tol: tolerance。
-        :param N: 迭代步数。
-        :return: self.parameter。
-        '''
+
         if len(self.parameter) == 0:
             self.initial_parameter()
         diff = 1
@@ -247,11 +234,6 @@ class HMMEmbeddingNonparametric:
         return weight_array
 
     def weight_compute(self, predtimes, method='stationary'):
-        '''
-        :param predtimes: int, 若 predtimes = N 则计算未来第N个时间点上不同模型的权重。
-        :param method, 计算权重的方法, 'dynamic' 根据最后一个时刻状态动态估计权重; 'stationary', 直接根据平稳分布输出权重
-        :return: 权重向量。
-        '''
         if method == 'dynamic':
             weight_array = self._state_compute(predtimes=predtimes)
         elif method == 'stationary':
